@@ -6,7 +6,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 
-# Permet d'utiliser asyncio dans Streamlit (nécessaire sur le cloud)
+# Permet d'utiliser asyncio dans Streamlit
 nest_asyncio.apply()
 
 # ====================== CONFIG STREAMLIT ======================
@@ -18,7 +18,7 @@ st.set_page_config(
 
 st.title("🗑️ Supprimeur de messages Telegram par date")
 st.markdown("**Supprime en 1 clic tous les messages d'une date donnée dans un canal Telegram.**")
-st.warning("⚠️ **ACTION IRRÉVERSIBLE !** Vous devez être administrateur du canal avec le droit « Supprimer les messages ». Utilisez à vos risques et périls. Telegram peut limiter les suppressions rapides.")
+st.warning("⚠️ **ACTION IRRÉVERSIBLE !** Vous devez être administrateur du canal avec le droit « Supprimer les messages ». Utilisez à vos risques et périls.")
 
 # ====================== SESSION STATE ======================
 if "logged_in" not in st.session_state:
@@ -31,6 +31,8 @@ if "api_hash" not in st.session_state:
     st.session_state.api_hash = None
 if "phone" not in st.session_state:
     st.session_state.phone = None
+if "code_sent" not in st.session_state:
+    st.session_state.code_sent = False
 
 # ====================== FONCTIONS ASYNC ======================
 async def create_client(session_str: str = None, api_id: int = None, api_hash: str = None):
@@ -64,8 +66,8 @@ async def delete_messages_on_date(client, entity, target_date: datetime.date):
     count = 0
     async for message in client.iter_messages(
         entity,
-        reverse=True,           # du plus ancien vers le plus récent
-        offset_date=start_date  # avec reverse=True → messages APRÈS cette date
+        reverse=True,
+        offset_date=start_date
     ):
         if message.date >= end_date:
             break
@@ -79,7 +81,6 @@ async def delete_messages_on_date(client, entity, target_date: datetime.date):
     if not message_ids:
         return 0
 
-    # Suppression par lots de 100 (limite Telegram)
     deleted = 0
     for i in range(0, len(message_ids), 100):
         batch = message_ids[i:i + 100]
@@ -92,21 +93,22 @@ async def delete_messages_on_date(client, entity, target_date: datetime.date):
         except FloodWaitError as e:
             progress_text.text(f"⏳ Flood wait {e.seconds}s...")
             await asyncio.sleep(e.seconds)
-            await client.delete_messages(entity, batch)  # réessayer
+            await client.delete_messages(entity, batch)
             deleted += len(batch)
         except Exception as e:
             st.warning(f"Erreur sur un lot : {e}")
 
     return deleted
 
-# ====================== WRAPPER SYNC POUR ASYNC ======================
-def run_async(coro):
-    """Exécute une coroutine dans le contexte Streamlit"""
+# ====================== RUN ASYNC CORRIGÉ ======================
+def run_async(func, *args, **kwargs):
+    """Exécute n'importe quelle fonction asynchrone"""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+    coro = func(*args, **kwargs)
     return loop.run_until_complete(coro)
 
 # ====================== INTERFACE LOGIN ======================
@@ -127,19 +129,17 @@ if not st.session_state.logged_in:
         else:
             with st.spinner("Connexion à Telegram..."):
                 try:
-                    client = run_async(create_client(api_id=api_id_input, api_hash=api_hash_input))
+                    client = run_async(create_client, api_id=api_id_input, api_hash=api_hash_input)
                     run_async(send_code_request, client, phone_input)
-                    # Sauvegarde temporaire pour la prochaine étape
                     st.session_state.temp_client = client
                     st.session_state.api_id = api_id_input
                     st.session_state.api_hash = api_hash_input
                     st.session_state.phone = phone_input
                     st.session_state.code_sent = True
-                    st.success("Code envoyé sur Telegram ! Vérifiez l'application.")
+                    st.success("Code envoyé sur Telegram ! Vérifiez l’application.")
                 except Exception as e:
                     st.error(f"Erreur lors de l'envoi du code : {e}")
 
-    # Étape 2 : saisie du code
     if st.session_state.get("code_sent", False):
         st.subheader("Entrez le code reçu")
         code_input = st.text_input("Code (5-6 chiffres)", max_chars=10)
@@ -155,7 +155,7 @@ if not st.session_state.logged_in:
                     st.session_state.session_str = session_str
                     st.session_state.logged_in = True
                     st.session_state.code_sent = False
-                    del st.session_state.temp_client  # nettoyage
+                    del st.session_state.temp_client
                     st.success("✅ Connexion réussie !")
                     st.rerun()
                 except Exception as e:
@@ -163,14 +163,13 @@ if not st.session_state.logged_in:
 
 else:
     # ====================== INTERFACE PRINCIPALE ======================
-    st.success(f"✅ Connecté (session sauvegardée)")
+    st.success(f"✅ Connecté")
 
     st.header("🎯 Configuration de la suppression")
 
     channel_input = st.text_input(
         "Canal (username ou ID)",
-        placeholder="@moncanal ou -1001234567890123",
-        help="Pour un canal public : @username. Pour privé : copiez l'ID depuis un lien d'invitation ou utilisez get_entity."
+        placeholder="@moncanal ou -1001234567890123"
     )
 
     target_date = st.date_input(
@@ -184,40 +183,35 @@ else:
     if st.button("🔥 SUPPRIMER TOUS LES MESSAGES DE CETTE DATE", type="primary", use_container_width=True):
         if not channel_input:
             st.error("Veuillez entrer le canal.")
+        elif st.checkbox("**Je confirme que cette action est irréversible et que j’ai les droits admin.**", key="confirm"):
+            with st.spinner("Récupération + suppression en cours... (peut prendre plusieurs minutes)"):
+                try:
+                    client = run_async(
+                        create_client,
+                        st.session_state.session_str,
+                        st.session_state.api_id,
+                        st.session_state.api_hash
+                    )
+
+                    entity = run_async(get_entity, client, channel_input)
+                    deleted_count = run_async(delete_messages_on_date, client, entity, target_date)
+
+                    if deleted_count > 0:
+                        st.balloons()
+                        st.success(f"🎉 {deleted_count} messages supprimés avec succès le {target_date} !")
+                    else:
+                        st.info("Aucun message trouvé à cette date.")
+
+                    run_async(client.disconnect)
+
+                except Exception as e:
+                    st.error(f"Erreur : {e}")
         else:
-            if st.checkbox("**Je confirme que cette action est irréversible et que j'ai les droits admin.**", key="confirm"):
-                with st.spinner("Récupération des messages + suppression en cours... (peut prendre plusieurs minutes)"):
-                    try:
-                        # Recréation du client à partir de la session
-                        client = run_async(
-                            create_client,
-                            st.session_state.session_str,
-                            st.session_state.api_id,
-                            st.session_state.api_hash
-                        )
-
-                        entity = run_async(get_entity, client, channel_input)
-
-                        deleted_count = run_async(delete_messages_on_date, client, entity, target_date)
-
-                        if deleted_count > 0:
-                            st.balloons()
-                            st.success(f"🎉 {deleted_count} messages supprimés avec succès le {target_date} !")
-                        else:
-                            st.info("Aucun message trouvé à cette date.")
-
-                        # Déconnexion propre
-                        run_async(client.disconnect)
-
-                    except Exception as e:
-                        st.error(f"Erreur : {e}")
-                        st.exception(e)
-            else:
-                st.warning("Cochez la case de confirmation.")
+            st.warning("Cochez la case de confirmation.")
 
     if st.button("🚪 Déconnexion"):
         st.session_state.logged_in = False
         st.session_state.session_str = None
         st.rerun()
 
-st.caption("App développée pour Streamlit Cloud • Déployez via GitHub • requirements.txt : `streamlit`, `telethon`, `nest_asyncio`")
+st.caption("App Streamlit • Téléthon • Corrigé le 27/02/2026")
